@@ -5,9 +5,8 @@ const config = {
   password: process.env.DB_PASSWORD,
   server: process.env.DB_SERVER,
   database: process.env.DB_NAME,
-  port: 1433,
   options: {
-    encrypt: false,
+    encrypt: true,
     trustServerCertificate: true,
   },
 };
