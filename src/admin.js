@@ -58,17 +58,19 @@ router.get('/domains', requireAdmin, async (req, res) => {
 
 router.post('/create-domain', requireAdmin, async (req, res) => {
   try {
-    const { name, workspace_code } = req.body;
-    if (!name || !workspace_code) {
-      return res.status(400).json({ error: 'Nombre y workspace_code son requeridos.' });
+    const { name, workspace_code, finnegans_client_id, finnegans_client_secret } = req.body;
+    if (!name || !workspace_code || !finnegans_client_id || !finnegans_client_secret) {
+      return res.status(400).json({ error: 'Todos los campos son requeridos.' });
     }
     const pool = await getPool();
     await pool.request()
       .input('name', sql.NVarChar, name.trim())
       .input('workspace_code', sql.NVarChar, workspace_code.trim().toLowerCase())
+      .input('finnegans_client_id', sql.NVarChar, finnegans_client_id.trim())
+      .input('finnegans_client_secret', sql.NVarChar, finnegans_client_secret.trim())
       .query(`
-        INSERT INTO domains (name, workspace_code, is_active)
-        VALUES (@name, @workspace_code, 1)
+        INSERT INTO domains (name, workspace_code, finnegans_client_id, finnegans_client_secret, is_active)
+        VALUES (@name, @workspace_code, @finnegans_client_id, @finnegans_client_secret, 1)
       `);
     return res.json({ ok: true, message: `Dominio "${name.trim()}" creado correctamente.` });
   } catch (err) {
@@ -351,6 +353,14 @@ const ADMIN_HTML = `<!DOCTYPE html>
             <input id="dw" type="text" placeholder="fisterra" autocomplete="off" required>
             <small>Código único en minúsculas. Los usuarios lo ingresan al iniciar sesión en la app.</small>
           </div>
+          <div class="field">
+            <label for="dci">Finnegans Client ID</label>
+            <input id="dci" type="text" autocomplete="off" required>
+          </div>
+          <div class="field">
+            <label for="dcs">Finnegans Client Secret</label>
+            <input id="dcs" type="password" autocomplete="off" required>
+          </div>
           <button class="btn btn-primary" type="submit" id="domain-btn">Crear Dominio</button>
           <p id="domain-msg" class="msg hidden"></p>
         </form>
@@ -481,6 +491,8 @@ const ADMIN_HTML = `<!DOCTYPE html>
       api('POST', '/create-domain', {
         name: document.getElementById('dn').value,
         workspace_code: document.getElementById('dw').value.toLowerCase().trim(),
+        finnegans_client_id: document.getElementById('dci').value,
+        finnegans_client_secret: document.getElementById('dcs').value,
       }).then(function(r) {
         setLoading('domain-btn', false);
         if (r.ok) {
