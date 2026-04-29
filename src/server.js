@@ -14,7 +14,11 @@ app.use(express.json());
 app.use('/auth', authRoutes);
 app.use('/admin', adminRoutes);
 
-app.get('/health', (req, res) => {
+app.get('/', (_req, res) => {
+  res.redirect('/admin');
+});
+
+app.get('/health', (_req, res) => {
   res.json({ ok: true });
 });
 
