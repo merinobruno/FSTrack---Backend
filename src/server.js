@@ -6,6 +6,7 @@ const cors = require('cors');
 const authRoutes = require('./auth');
 const adminRoutes = require('./admin');
 const logRoutes = require('./log');
+const finnegansRoutes = require('./finnegans');
 
 const app = express();
 
@@ -15,6 +16,7 @@ app.use(express.json());
 app.use('/auth', authRoutes);
 app.use('/admin', adminRoutes);
 app.use('/log', logRoutes);
+app.use('/finnegans', finnegansRoutes);
 
 app.get('/', (_req, res) => {
   res.redirect('/admin');
