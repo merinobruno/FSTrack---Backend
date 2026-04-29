@@ -110,6 +110,35 @@ router.post('/create-account', requireAdmin, async (req, res) => {
   }
 });
 
+router.get('/logs', requireAdmin, async (req, res) => {
+  try {
+    const pool = await getPool();
+    const result = await pool.request().query(`
+      SELECT TOP 200
+        l.id,
+        l.form_type,
+        l.lote,
+        l.categoria,
+        l.cantidad,
+        l.deposito,
+        l.status,
+        l.error_detail,
+        l.created_at,
+        a.username,
+        a.full_name,
+        d.name AS domain_name
+      FROM logs l
+      INNER JOIN accounts a ON a.id = l.account_id
+      INNER JOIN domains  d ON d.id = l.domain_id
+      ORDER BY l.created_at DESC
+    `);
+    return res.json({ logs: result.recordset });
+  } catch (err) {
+    console.error('GET /admin/logs error', err);
+    return res.status(500).json({ error: 'Error interno del servidor.' });
+  }
+});
+
 module.exports = router;
 
 /* ─── Admin HTML ──────────────────────────────────────────────────────────── */
@@ -307,6 +336,37 @@ const ADMIN_HTML = `<!DOCTYPE html>
       border: 1px solid rgba(239,68,68,0.3);
       color: #fca5a5;
     }
+
+    /* ── LOGS TABLE ─────────────────────────── */
+    .logs-card { margin-top: 1.25rem; }
+
+    .logs-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.8rem;
+    }
+
+    .logs-table th, .logs-table td {
+      padding: 0.5rem 0.75rem;
+      text-align: left;
+      border-bottom: 1px solid #1e293b;
+      white-space: nowrap;
+    }
+
+    .logs-table th {
+      color: #64748b;
+      font-weight: 500;
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      background: #0f172a;
+    }
+
+    .logs-table tbody tr:hover { background: rgba(255,255,255,0.02); }
+
+    .tag-ok  { color: #6ee7b7; font-weight: 600; }
+    .tag-err { color: #fca5a5; font-weight: 600; }
+    .err-detail { color: #64748b; font-size: 0.75rem; display: block; margin-top: 2px; white-space: normal; max-width: 260px; }
   </style>
 </head>
 <body>
@@ -399,6 +459,18 @@ const ADMIN_HTML = `<!DOCTYPE html>
       </div>
 
     </div>
+
+    <!-- Logs -->
+    <div class="card logs-card">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.25rem;">
+        <h2 style="margin:0;">Registros de actividad</h2>
+        <button class="btn btn-ghost" id="load-logs-btn">Cargar</button>
+      </div>
+      <div id="logs-container">
+        <p style="color:#64748b;font-size:0.875rem;">Presioná "Cargar" para ver los últimos 200 registros.</p>
+      </div>
+    </div>
+
   </div>
 
   <script>
@@ -530,6 +602,55 @@ const ADMIN_HTML = `<!DOCTYPE html>
       }).catch(function() {
         setLoading('account-btn', false);
         showMsg('account-msg', 'No se pudo conectar al servidor.', 'error');
+      });
+    });
+    // LOAD LOGS
+    document.getElementById('load-logs-btn').addEventListener('click', function() {
+      var btn = document.getElementById('load-logs-btn');
+      var container = document.getElementById('logs-container');
+      btn.disabled = true;
+      container.innerHTML = '<p style="color:#64748b;font-size:0.875rem;">Cargando...</p>';
+
+      api('GET', '/logs').then(function(r) {
+        btn.disabled = false;
+        if (!r.ok) {
+          container.innerHTML = '<p style="color:#fca5a5;font-size:0.875rem;">' + (r.data.error || 'Error al cargar registros.') + '</p>';
+          return;
+        }
+        var logs = r.data.logs;
+        if (!logs || logs.length === 0) {
+          container.innerHTML = '<p style="color:#64748b;font-size:0.875rem;">No hay registros aún.</p>';
+          return;
+        }
+        var html = '<div style="overflow-x:auto;"><table class="logs-table"><thead><tr>' +
+          '<th>Fecha</th><th>Usuario</th><th>Dominio</th><th>Formulario</th>' +
+          '<th>Lote</th><th>Categoría</th><th>Cantidad</th><th>Depósito</th><th>Estado</th>' +
+          '</tr></thead><tbody>';
+
+        logs.forEach(function(l) {
+          var d = new Date(l.created_at);
+          var dateStr = d.toLocaleDateString('es-AR') + ' ' + d.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' });
+          var statusHtml = l.status === 'SUCCESS'
+            ? '<span class="tag-ok">OK</span>'
+            : '<span class="tag-err">ERROR</span>' + (l.error_detail ? '<span class="err-detail">' + l.error_detail + '</span>' : '');
+          html += '<tr>' +
+            '<td>' + dateStr + '</td>' +
+            '<td>' + (l.full_name || l.username) + '</td>' +
+            '<td>' + l.domain_name + '</td>' +
+            '<td>' + l.form_type + '</td>' +
+            '<td>' + (l.lote || '—') + '</td>' +
+            '<td>' + (l.categoria || '—') + '</td>' +
+            '<td>' + (l.cantidad != null ? l.cantidad : '—') + '</td>' +
+            '<td>' + (l.deposito || '—') + '</td>' +
+            '<td>' + statusHtml + '</td>' +
+            '</tr>';
+        });
+
+        html += '</tbody></table></div>';
+        container.innerHTML = html;
+      }).catch(function() {
+        btn.disabled = false;
+        container.innerHTML = '<p style="color:#fca5a5;font-size:0.875rem;">No se pudo conectar al servidor.</p>';
       });
     });
   </script>
