@@ -4,9 +4,9 @@ const { getPool, sql } = require('./src/db');
 
 async function main() {
   const workspace = 'fisterra';
-  const username = 'admin2';
-  const password = '159753';
-  const fullName = 'Administrador';
+  const username = 'admin';
+  const password = '1234';
+  const fullName = 'Admin';
   const role = 'admin';
 
   const passwordHash = await bcrypt.hash(password, 10);

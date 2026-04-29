@@ -7,11 +7,11 @@ const config = {
   database: process.env.DB_NAME,
   options: {
     encrypt: true,
-    trustServerCertificate: true,
+    trustServerCertificate: false,
   },
 };
 
-let pool;
+let pool = null;
 
 async function getPool() {
   if (pool) return pool;
