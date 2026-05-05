@@ -21,7 +21,7 @@ function verifyAppToken(req, res, next) {
 
 router.post('/', verifyAppToken, async (req, res) => {
   try {
-    const { form_type, lote, categoria, cantidad, deposito, status, error_detail } = req.body;
+    const { form_type, lote, categoria, cantidad, deposito, company_label, status, error_detail } = req.body;
 
     if (!form_type || !status) {
       return res.status(400).json({ error: 'form_type y status son requeridos.' });
@@ -32,25 +32,46 @@ router.post('/', verifyAppToken, async (req, res) => {
 
     const pool = await getPool();
     await pool.request()
-      .input('account_id', sql.Int, req.accountId)
-      .input('domain_id',  sql.Int, req.domainId)
-      .input('form_type',  sql.NVarChar, form_type)
-      .input('lote',       sql.NVarChar, lote       || null)
-      .input('categoria',  sql.NVarChar, categoria  || null)
-      .input('cantidad',   sql.Int,      isNaN(cantidadInt) ? null : cantidadInt)
-      .input('deposito',   sql.NVarChar, deposito   || null)
-      .input('status',     sql.NVarChar, status)
-      .input('error_detail', sql.NVarChar, error_detail || null)
+      .input('account_id',    sql.Int,      req.accountId)
+      .input('domain_id',     sql.Int,      req.domainId)
+      .input('form_type',     sql.NVarChar, form_type)
+      .input('lote',          sql.NVarChar, lote          || null)
+      .input('categoria',     sql.NVarChar, categoria     || null)
+      .input('cantidad',      sql.Int,      isNaN(cantidadInt) ? null : cantidadInt)
+      .input('deposito',      sql.NVarChar, deposito      || null)
+      .input('company_label', sql.NVarChar, company_label || null)
+      .input('status',        sql.NVarChar, status)
+      .input('error_detail',  sql.NVarChar, error_detail  || null)
       .query(`
         INSERT INTO logs
-          (account_id, domain_id, form_type, lote, categoria, cantidad, deposito, status, error_detail)
+          (account_id, domain_id, form_type, lote, categoria, cantidad, deposito, company_label, status, error_detail)
         VALUES
-          (@account_id, @domain_id, @form_type, @lote, @categoria, @cantidad, @deposito, @status, @error_detail)
+          (@account_id, @domain_id, @form_type, @lote, @categoria, @cantidad, @deposito, @company_label, @status, @error_detail)
       `);
 
     return res.json({ ok: true });
   } catch (err) {
     console.error('POST /log error', err);
+    return res.status(500).json({ error: 'Error interno del servidor.' });
+  }
+});
+
+router.get('/mine', verifyAppToken, async (req, res) => {
+  try {
+    const pool = await getPool();
+    const result = await pool.request()
+      .input('account_id', sql.Int, req.accountId)
+      .query(`
+        SELECT TOP 100
+          id, form_type, lote, categoria, cantidad, deposito,
+          company_label, status, error_detail, created_at
+        FROM logs
+        WHERE account_id = @account_id
+        ORDER BY created_at DESC
+      `);
+    return res.json(result.recordset);
+  } catch (err) {
+    console.error('GET /log/mine error', err);
     return res.status(500).json({ error: 'Error interno del servidor.' });
   }
 });
