@@ -483,7 +483,12 @@ const ADMIN_HTML = `<!DOCTYPE html>
       cursor: pointer;
     }
 
-    .company-item:hover { background: rgba(255,255,255,0.04); }
+    .company-item:hover { background: rgba(255,255,255,0.05); }
+
+    .company-item:has(input:checked) {
+      background: rgba(99,102,241,0.18);
+      outline: 1px solid rgba(99,102,241,0.45);
+    }
 
     .company-item input[type="checkbox"] {
       width: 15px;
@@ -499,6 +504,11 @@ const ADMIN_HTML = `<!DOCTYPE html>
       cursor: pointer;
       margin: 0;
       line-height: 1.3;
+    }
+
+    .company-item:has(input:checked) label {
+      color: #a5b4fc;
+      font-weight: 500;
     }
 
     .assign-row {
