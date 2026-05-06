@@ -139,6 +139,99 @@ router.get('/logs', requireAdmin, async (req, res) => {
   }
 });
 
+router.get('/accounts', requireAdmin, async (req, res) => {
+  try {
+    const { domain_id } = req.query;
+    if (!domain_id) return res.status(400).json({ error: 'domain_id requerido.' });
+    const pool = await getPool();
+    const result = await pool.request()
+      .input('domain_id', sql.Int, parseInt(domain_id, 10))
+      .query(`SELECT id, username, full_name FROM accounts WHERE domain_id = @domain_id AND is_active = 1 ORDER BY full_name`);
+    return res.json({ accounts: result.recordset });
+  } catch (err) {
+    console.error('GET /admin/accounts error', err);
+    return res.status(500).json({ error: 'Error interno del servidor.' });
+  }
+});
+
+router.get('/finnegans-companies', requireAdmin, async (req, res) => {
+  try {
+    const { domain_id } = req.query;
+    if (!domain_id) return res.status(400).json({ error: 'domain_id requerido.' });
+    const pool = await getPool();
+    const domResult = await pool.request()
+      .input('domain_id', sql.Int, parseInt(domain_id, 10))
+      .query(`SELECT finnegans_client_id, finnegans_client_secret FROM domains WHERE id = @domain_id AND is_active = 1`);
+    if (domResult.recordset.length === 0) return res.status(404).json({ error: 'Dominio no encontrado.' });
+    const { finnegans_client_id, finnegans_client_secret } = domResult.recordset[0];
+    const tokenRes = await fetch(
+      `https://api.teamplace.finneg.com/api/oauth/token?grant_type=client_credentials&client_id=${finnegans_client_id}&client_secret=${finnegans_client_secret}`
+    );
+    if (!tokenRes.ok) return res.status(502).json({ error: 'Error al obtener token de Finnegans.' });
+    const finnegansToken = await tokenRes.text();
+    const companiesRes = await fetch(`https://api.finneg.com/api/empresaSucursal/list?ACCESS_TOKEN=${finnegansToken}`);
+    if (!companiesRes.ok) return res.status(502).json({ error: 'Error al obtener empresas de Finnegans.' });
+    const data = await companiesRes.json();
+    const rows = Array.isArray(data) ? data
+      : Array.isArray(data?.data) ? data.data
+      : Array.isArray(data?.rows) ? data.rows
+      : Array.isArray(data?.result) ? data.result : [];
+    const companies = rows
+      .filter(item => { const a = item.activo ?? item.ACTIVO; return a === true || a === 'true' || a === 1 || a === '1'; })
+      .map(item => ({
+        label: item.nombre ?? item.NOMBRE ?? item.establecimiento ?? item.Establecimiento ?? item.descripcion ?? item.Descripcion ?? item.codigo ?? item.CODIGO ?? '',
+        value: item.codigo ?? item.CODIGO ?? item.empresaCodigo ?? item.EmpresaCodigo ?? item.establecimientoCodigo ?? item.EstablecimientoCodigo ?? item.value ?? '',
+      }))
+      .filter(c => c.label && c.value);
+    return res.json({ companies });
+  } catch (err) {
+    console.error('GET /admin/finnegans-companies error', err);
+    return res.status(500).json({ error: 'Error interno del servidor.' });
+  }
+});
+
+router.get('/account-companies', requireAdmin, async (req, res) => {
+  try {
+    const { account_id } = req.query;
+    if (!account_id) return res.status(400).json({ error: 'account_id requerido.' });
+    const pool = await getPool();
+    const result = await pool.request()
+      .input('account_id', sql.Int, parseInt(account_id, 10))
+      .query(`SELECT company_code FROM account_companies WHERE account_id = @account_id`);
+    return res.json({ codes: result.recordset.map(r => r.company_code) });
+  } catch (err) {
+    console.error('GET /admin/account-companies error', err);
+    return res.status(500).json({ error: 'Error interno del servidor.' });
+  }
+});
+
+router.post('/assign-companies', requireAdmin, async (req, res) => {
+  try {
+    const { account_id, companies } = req.body;
+    if (!account_id) return res.status(400).json({ error: 'account_id requerido.' });
+    const pool = await getPool();
+    await pool.request()
+      .input('account_id', sql.Int, parseInt(account_id, 10))
+      .query(`DELETE FROM account_companies WHERE account_id = @account_id`);
+    if (companies && companies.length > 0) {
+      for (const c of companies) {
+        await pool.request()
+          .input('account_id', sql.Int, parseInt(account_id, 10))
+          .input('company_code', sql.NVarChar, c.code)
+          .input('company_label', sql.NVarChar, c.label)
+          .query(`INSERT INTO account_companies (account_id, company_code, company_label) VALUES (@account_id, @company_code, @company_label)`);
+      }
+    }
+    const msg = companies && companies.length > 0
+      ? `${companies.length} empresa(s) asignada(s).`
+      : 'Restricciones eliminadas (acceso a todas las empresas).';
+    return res.json({ ok: true, message: msg });
+  } catch (err) {
+    console.error('POST /admin/assign-companies error', err);
+    return res.status(500).json({ error: 'Error interno del servidor.' });
+  }
+});
+
 module.exports = router;
 
 /* ─── Admin HTML ──────────────────────────────────────────────────────────── */
@@ -367,6 +460,55 @@ const ADMIN_HTML = `<!DOCTYPE html>
     .tag-ok  { color: #6ee7b7; font-weight: 600; }
     .tag-err { color: #fca5a5; font-weight: 600; }
     .err-detail { color: #64748b; font-size: 0.75rem; display: block; margin-top: 2px; white-space: normal; max-width: 260px; }
+
+    /* ── COMPANY CHECKBOXES ─────────────────── */
+    .company-list {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.375rem;
+      max-height: 260px;
+      overflow-y: auto;
+      padding: 0.5rem;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      background: #0f172a;
+    }
+
+    .company-item {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.35rem 0.5rem;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+
+    .company-item:hover { background: rgba(255,255,255,0.04); }
+
+    .company-item input[type="checkbox"] {
+      width: 15px;
+      height: 15px;
+      accent-color: #6366f1;
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+
+    .company-item label {
+      font-size: 0.8125rem;
+      color: #e2e8f0;
+      cursor: pointer;
+      margin: 0;
+      line-height: 1.3;
+    }
+
+    .assign-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+      margin-bottom: 1rem;
+    }
+
+    @media (max-width: 640px) { .assign-row { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
@@ -460,6 +602,32 @@ const ADMIN_HTML = `<!DOCTYPE html>
 
     </div>
 
+    <!-- Asignar Empresas -->
+    <div class="card" style="margin-top:1.25rem;">
+      <h2>Asignar Empresas a Cuenta</h2>
+      <div class="assign-row">
+        <div class="field" style="margin:0;">
+          <label for="ac-domain">Dominio</label>
+          <select id="ac-domain">
+            <option value="">— Seleccionar dominio —</option>
+          </select>
+        </div>
+        <div class="field" style="margin:0;">
+          <label for="ac-account">Cuenta</label>
+          <select id="ac-account" disabled>
+            <option value="">— Seleccionar cuenta —</option>
+          </select>
+        </div>
+      </div>
+      <div id="ac-loading" style="display:none;color:#64748b;font-size:0.875rem;margin-bottom:0.75rem;">Cargando empresas de Finnegans…</div>
+      <div id="ac-companies-wrap" style="display:none;">
+        <p style="font-size:0.8rem;color:#94a3b8;margin-bottom:0.5rem;">Marcar las empresas a las que esta cuenta tendrá acceso. Sin ninguna seleccionada, verá todas.</p>
+        <div id="ac-companies-list" class="company-list"></div>
+        <button class="btn btn-primary" id="ac-save-btn" style="margin-top:1rem;width:auto;padding-left:1.5rem;padding-right:1.5rem;">Guardar asignación</button>
+        <p id="ac-msg" class="msg hidden"></p>
+      </div>
+    </div>
+
     <!-- Logs -->
     <div class="card logs-card">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.25rem;">
@@ -502,20 +670,23 @@ const ADMIN_HTML = `<!DOCTYPE html>
 
     function loadDomains() {
       return api('GET', '/domains').then(function(r) {
-        var select = document.getElementById('ad');
-        select.innerHTML = '';
-        if (r.ok && r.data.domains) {
-          if (r.data.domains.length === 0) {
-            select.innerHTML = '<option value="">— Sin dominios activos —</option>';
-          } else {
-            r.data.domains.forEach(function(d) {
-              var opt = document.createElement('option');
-              opt.value = d.id;
-              opt.textContent = d.name + ' (' + d.workspace_code + ')';
-              select.appendChild(opt);
-            });
+        var selects = [document.getElementById('ad'), document.getElementById('ac-domain')];
+        selects.forEach(function(select) {
+          var isAc = select.id === 'ac-domain';
+          select.innerHTML = isAc ? '<option value="">— Seleccionar dominio —</option>' : '';
+          if (r.ok && r.data.domains) {
+            if (r.data.domains.length === 0 && !isAc) {
+              select.innerHTML = '<option value="">— Sin dominios activos —</option>';
+            } else {
+              r.data.domains.forEach(function(d) {
+                var opt = document.createElement('option');
+                opt.value = d.id;
+                opt.textContent = d.name + ' (' + d.workspace_code + ')';
+                select.appendChild(opt);
+              });
+            }
           }
-        }
+        });
       });
     }
 
@@ -651,6 +822,103 @@ const ADMIN_HTML = `<!DOCTYPE html>
       }).catch(function() {
         btn.disabled = false;
         container.innerHTML = '<p style="color:#fca5a5;font-size:0.875rem;">No se pudo conectar al servidor.</p>';
+      });
+    });
+    // ── ASSIGN COMPANIES ──────────────────────────────────────────────
+    var acDomainSel  = document.getElementById('ac-domain');
+    var acAccountSel = document.getElementById('ac-account');
+    var acLoading    = document.getElementById('ac-loading');
+    var acWrap       = document.getElementById('ac-companies-wrap');
+    var acList       = document.getElementById('ac-companies-list');
+    var acSaveBtn    = document.getElementById('ac-save-btn');
+    var acMsg        = document.getElementById('ac-msg');
+
+    var acAllCompanies = [];
+    var acAssignedCodes = [];
+
+    acDomainSel.addEventListener('change', function() {
+      var domainId = acDomainSel.value;
+      acAccountSel.innerHTML = '<option value="">— Seleccionar cuenta —</option>';
+      acAccountSel.disabled = true;
+      acWrap.style.display = 'none';
+      acLoading.style.display = 'none';
+      acAllCompanies = [];
+      acAssignedCodes = [];
+      if (!domainId) return;
+
+      api('GET', '/accounts?domain_id=' + domainId).then(function(r) {
+        if (!r.ok) return;
+        acAccountSel.disabled = false;
+        r.data.accounts.forEach(function(a) {
+          var opt = document.createElement('option');
+          opt.value = a.id;
+          opt.textContent = a.full_name + ' (' + a.username + ')';
+          acAccountSel.appendChild(opt);
+        });
+      });
+
+      acLoading.style.display = 'block';
+      api('GET', '/finnegans-companies?domain_id=' + domainId).then(function(r) {
+        acLoading.style.display = 'none';
+        if (!r.ok) { acLoading.style.display = 'block'; acLoading.textContent = r.data.error || 'Error al cargar empresas.'; return; }
+        acAllCompanies = r.data.companies;
+        if (acAccountSel.value) renderCompanies();
+      });
+    });
+
+    acAccountSel.addEventListener('change', function() {
+      var accountId = acAccountSel.value;
+      acWrap.style.display = 'none';
+      acAssignedCodes = [];
+      acMsg.className = 'msg hidden';
+      if (!accountId) return;
+
+      api('GET', '/account-companies?account_id=' + accountId).then(function(r) {
+        if (r.ok) acAssignedCodes = r.data.codes || [];
+        if (acAllCompanies.length > 0) renderCompanies();
+      });
+    });
+
+    function renderCompanies() {
+      acList.innerHTML = '';
+      acAllCompanies.forEach(function(c) {
+        var item = document.createElement('div');
+        item.className = 'company-item';
+        var cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.id = 'cb-' + c.value;
+        cb.value = c.value;
+        cb.checked = acAssignedCodes.indexOf(c.value) !== -1;
+        var lbl = document.createElement('label');
+        lbl.htmlFor = 'cb-' + c.value;
+        lbl.textContent = c.label;
+        item.appendChild(cb);
+        item.appendChild(lbl);
+        acList.appendChild(item);
+      });
+      acWrap.style.display = 'block';
+      acMsg.className = 'msg hidden';
+    }
+
+    acSaveBtn.addEventListener('click', function() {
+      var accountId = acAccountSel.value;
+      if (!accountId) return;
+      var checked = Array.from(acList.querySelectorAll('input[type=checkbox]:checked')).map(function(cb) {
+        var company = acAllCompanies.find(function(c) { return c.value === cb.value; });
+        return { code: cb.value, label: company ? company.label : cb.value };
+      });
+      acSaveBtn.disabled = true;
+      api('POST', '/assign-companies', { account_id: accountId, companies: checked }).then(function(r) {
+        acSaveBtn.disabled = false;
+        var el = document.getElementById('ac-msg');
+        el.textContent = r.ok ? r.data.message : (r.data.error || 'Error al guardar.');
+        el.className = 'msg ' + (r.ok ? 'success' : 'error');
+        if (r.ok) acAssignedCodes = checked.map(function(c) { return c.code; });
+      }).catch(function() {
+        acSaveBtn.disabled = false;
+        var el = document.getElementById('ac-msg');
+        el.textContent = 'No se pudo conectar al servidor.';
+        el.className = 'msg error';
       });
     });
   </script>

@@ -87,4 +87,26 @@ router.post('/login', async (req, res) => {
   }
 });
 
+router.get('/my-companies', async (req, res) => {
+  const auth = req.headers['authorization'];
+  if (!auth || !auth.startsWith('Bearer ')) return res.status(401).json({ error: 'No autorizado.' });
+  let accountId;
+  try {
+    const payload = require('jsonwebtoken').verify(auth.slice(7), process.env.JWT_SECRET);
+    accountId = payload.accountId;
+  } catch {
+    return res.status(401).json({ error: 'Token inválido o expirado.' });
+  }
+  try {
+    const pool = await getPool();
+    const result = await pool.request()
+      .input('account_id', sql.Int, accountId)
+      .query(`SELECT company_code FROM account_companies WHERE account_id = @account_id`);
+    return res.json({ codes: result.recordset.map(r => r.company_code) });
+  } catch (err) {
+    console.error('GET /auth/my-companies error', err);
+    return res.status(500).json({ error: 'Error interno del servidor.' });
+  }
+});
+
 module.exports = router;
