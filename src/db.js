@@ -16,6 +16,10 @@ let pool = null;
 async function getPool() {
   if (pool) return pool;
   pool = await sql.connect(config);
+  // Ping every 4 min to prevent Azure SQL Serverless from autopausing
+  setInterval(async () => {
+    try { await pool.request().query('SELECT 1'); } catch {}
+  }, 4 * 60 * 1000);
   return pool;
 }
 
