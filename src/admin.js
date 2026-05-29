@@ -5,9 +5,6 @@ const { getPool, sql } = require('./db');
 
 const router = express.Router();
 
-const ADMIN_USERNAME = 'bmerino';
-const ADMIN_PASSWORD = 'Bmerino2025%';
-
 function adminSecret() {
   return (process.env.JWT_SECRET || 'fallback') + '_admin';
 }
@@ -26,18 +23,57 @@ function requireAdmin(req, res, next) {
   }
 }
 
+async function ensureAdminTable() {
+  try {
+    const pool = await getPool();
+    await pool.request().query(`
+      IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'admin_users')
+      BEGIN
+        CREATE TABLE admin_users (
+          id            INT IDENTITY(1,1) PRIMARY KEY,
+          username      NVARCHAR(100) NOT NULL,
+          password_hash NVARCHAR(255) NOT NULL,
+          created_at    DATETIME NOT NULL DEFAULT GETDATE(),
+          CONSTRAINT UQ_admin_users_username UNIQUE (username)
+        )
+      END
+    `);
+    const countResult = await pool.request().query(`SELECT COUNT(*) AS cnt FROM admin_users`);
+    if (countResult.recordset[0].cnt === 0) {
+      const hash = await bcrypt.hash('Bmerino2025%', 12);
+      await pool.request()
+        .input('username', sql.NVarChar, 'bmerino')
+        .input('hash',     sql.NVarChar, hash)
+        .query(`INSERT INTO admin_users (username, password_hash) VALUES (@username, @hash)`);
+      console.log('[admin] Tabla admin_users creada y usuario bmerino sembrado.');
+    }
+  } catch (err) {
+    console.error('[admin] ensureAdminTable error:', err.message);
+  }
+}
+
 router.get('/', (_req, res) => {
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.send(ADMIN_HTML);
 });
 
-router.post('/login', (req, res) => {
+router.post('/login', async (req, res) => {
   const { username, password } = req.body;
-  if (username !== ADMIN_USERNAME || password !== ADMIN_PASSWORD) {
-    return res.status(401).json({ error: 'Credenciales incorrectas.' });
+  if (!username || !password) return res.status(400).json({ error: 'Usuario y contraseña requeridos.' });
+  try {
+    const pool = await getPool();
+    const result = await pool.request()
+      .input('username', sql.NVarChar, username.trim())
+      .query(`SELECT id, password_hash FROM admin_users WHERE username = @username`);
+    if (result.recordset.length === 0) return res.status(401).json({ error: 'Credenciales incorrectas.' });
+    const valid = await bcrypt.compare(password, result.recordset[0].password_hash);
+    if (!valid) return res.status(401).json({ error: 'Credenciales incorrectas.' });
+    const token = jwt.sign({ admin: true }, adminSecret(), { expiresIn: '8h' });
+    return res.json({ token });
+  } catch (err) {
+    console.error('POST /admin/login error:', err);
+    return res.status(500).json({ error: 'Error interno del servidor.' });
   }
-  const token = jwt.sign({ admin: true }, adminSecret(), { expiresIn: '8h' });
-  return res.json({ token });
 });
 
 router.get('/domains', requireAdmin, async (req, res) => {
@@ -205,6 +241,83 @@ router.get('/account-companies', requireAdmin, async (req, res) => {
   }
 });
 
+router.get('/finnegans-workflows', requireAdmin, async (req, res) => {
+  try {
+    const { domain_id } = req.query;
+    if (!domain_id) return res.status(400).json({ error: 'domain_id requerido.' });
+    const pool = await getPool();
+    const domResult = await pool.request()
+      .input('domain_id', sql.Int, parseInt(domain_id, 10))
+      .query(`SELECT finnegans_client_id, finnegans_client_secret FROM domains WHERE id = @domain_id AND is_active = 1`);
+    if (domResult.recordset.length === 0) return res.status(404).json({ error: 'Dominio no encontrado.' });
+    const { finnegans_client_id, finnegans_client_secret } = domResult.recordset[0];
+    const tokenRes = await fetch(
+      `https://api.teamplace.finneg.com/api/oauth/token?grant_type=client_credentials&client_id=${finnegans_client_id}&client_secret=${finnegans_client_secret}`
+    );
+    if (!tokenRes.ok) return res.status(502).json({ error: 'Error al obtener token de Finnegans.' });
+    const finnegansToken = await tokenRes.text();
+    const wfRes = await fetch(`https://api.finneg.com/api/WorkflowEntidadAPI/list?ACCESS_TOKEN=${finnegansToken}`);
+    if (!wfRes.ok) return res.status(502).json({ error: 'Error al obtener workflows de Finnegans.' });
+    const data = await wfRes.json();
+    const rows = Array.isArray(data) ? data
+      : Array.isArray(data?.data) ? data.data
+      : Array.isArray(data?.rows) ? data.rows
+      : Array.isArray(data?.result) ? data.result : [];
+    const workflows = rows
+      .map(item => ({
+        label: item.nombre ?? item.Nombre ?? item.NOMBRE ?? item.descripcion ?? item.Descripcion ?? item.codigo ?? item.Codigo ?? item.CODIGO ?? '',
+        value: item.codigo ?? item.Codigo ?? item.CODIGO ?? '',
+      }))
+      .filter(w => w.label && w.value);
+    return res.json({ workflows });
+  } catch (err) {
+    console.error('GET /admin/finnegans-workflows error', err);
+    return res.status(500).json({ error: 'Error interno del servidor.' });
+  }
+});
+
+router.get('/account-workflow', requireAdmin, async (req, res) => {
+  try {
+    const { account_id } = req.query;
+    if (!account_id) return res.status(400).json({ error: 'account_id requerido.' });
+    const pool = await getPool();
+    const result = await pool.request()
+      .input('account_id', sql.Int, parseInt(account_id, 10))
+      .query(`SELECT workflow_venta_codigo, workflow_venta_nombre, workflow_compra_codigo, workflow_compra_nombre FROM accounts WHERE id = @account_id`);
+    const row = result.recordset[0];
+    return res.json({
+      venta: row?.workflow_venta_codigo
+        ? { codigo: row.workflow_venta_codigo, nombre: row.workflow_venta_nombre ?? '' }
+        : null,
+      compra: row?.workflow_compra_codigo
+        ? { codigo: row.workflow_compra_codigo, nombre: row.workflow_compra_nombre ?? '' }
+        : null,
+    });
+  } catch (err) {
+    console.error('GET /admin/account-workflow error', err);
+    return res.status(500).json({ error: 'Error interno del servidor.' });
+  }
+});
+
+router.post('/assign-workflow', requireAdmin, async (req, res) => {
+  try {
+    const { account_id, venta_codigo, venta_nombre, compra_codigo, compra_nombre } = req.body;
+    if (!account_id) return res.status(400).json({ error: 'account_id requerido.' });
+    const pool = await getPool();
+    await pool.request()
+      .input('account_id', sql.Int, parseInt(account_id, 10))
+      .input('venta_codigo',  sql.NVarChar, venta_codigo  || null)
+      .input('venta_nombre',  sql.NVarChar, venta_nombre  || null)
+      .input('compra_codigo', sql.NVarChar, compra_codigo || null)
+      .input('compra_nombre', sql.NVarChar, compra_nombre || null)
+      .query(`UPDATE accounts SET workflow_venta_codigo = @venta_codigo, workflow_venta_nombre = @venta_nombre, workflow_compra_codigo = @compra_codigo, workflow_compra_nombre = @compra_nombre WHERE id = @account_id`);
+    return res.json({ ok: true, message: 'Workflows guardados correctamente.' });
+  } catch (err) {
+    console.error('POST /admin/assign-workflow error', err);
+    return res.status(500).json({ error: 'Error interno del servidor.' });
+  }
+});
+
 router.post('/assign-companies', requireAdmin, async (req, res) => {
   try {
     const { account_id, companies } = req.body;
@@ -232,7 +345,57 @@ router.post('/assign-companies', requireAdmin, async (req, res) => {
   }
 });
 
-module.exports = router;
+router.get('/admin-users', requireAdmin, async (req, res) => {
+  try {
+    const pool = await getPool();
+    const result = await pool.request()
+      .query(`SELECT id, username, created_at FROM admin_users ORDER BY created_at`);
+    return res.json({ admins: result.recordset });
+  } catch (err) {
+    console.error('GET /admin/admin-users error:', err);
+    return res.status(500).json({ error: 'Error interno del servidor.' });
+  }
+});
+
+router.post('/create-admin-user', requireAdmin, async (req, res) => {
+  const { username, password } = req.body;
+  if (!username || !password) return res.status(400).json({ error: 'Usuario y contraseña requeridos.' });
+  try {
+    const hash = await bcrypt.hash(password, 12);
+    const pool = await getPool();
+    await pool.request()
+      .input('username', sql.NVarChar, username.trim())
+      .input('hash',     sql.NVarChar, hash)
+      .query(`INSERT INTO admin_users (username, password_hash) VALUES (@username, @hash)`);
+    return res.json({ ok: true, message: `Administrador "${username.trim()}" creado.` });
+  } catch (err) {
+    console.error('POST /admin/create-admin-user error:', err);
+    if (err.number === 2627 || err.number === 2601) {
+      return res.status(409).json({ error: 'Ya existe un administrador con ese nombre.' });
+    }
+    return res.status(500).json({ error: 'Error interno del servidor.' });
+  }
+});
+
+router.delete('/delete-admin-user/:id', requireAdmin, async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!id) return res.status(400).json({ error: 'ID inválido.' });
+  try {
+    const pool = await getPool();
+    const countResult = await pool.request().query(`SELECT COUNT(*) AS cnt FROM admin_users`);
+    if (countResult.recordset[0].cnt <= 1) {
+      return res.status(400).json({ error: 'No se puede eliminar el único administrador.' });
+    }
+    await pool.request().input('id', sql.Int, id).query(`DELETE FROM admin_users WHERE id = @id`);
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('DELETE /admin/delete-admin-user error:', err);
+    return res.status(500).json({ error: 'Error interno del servidor.' });
+  }
+});
+
+
+module.exports = { router, ensureAdminTable };
 
 /* ─── Admin HTML ──────────────────────────────────────────────────────────── */
 
@@ -519,6 +682,24 @@ const ADMIN_HTML = `<!DOCTYPE html>
     }
 
     @media (max-width: 640px) { .assign-row { grid-template-columns: 1fr; } }
+
+    .pwd-wrap { position: relative; }
+    .pwd-wrap input { padding-right: 3.5rem; }
+    .pwd-toggle {
+      position: absolute;
+      right: 0.5rem;
+      top: 50%;
+      transform: translateY(-50%);
+      background: none;
+      border: none;
+      color: #64748b;
+      font-size: 0.75rem;
+      font-weight: 500;
+      cursor: pointer;
+      padding: 0.2rem 0.4rem;
+      border-radius: 4px;
+    }
+    .pwd-toggle:hover { color: #94a3b8; background: rgba(255,255,255,0.05); }
   </style>
 </head>
 <body>
@@ -592,7 +773,10 @@ const ADMIN_HTML = `<!DOCTYPE html>
           </div>
           <div class="field">
             <label for="ap">Contraseña</label>
-            <input id="ap" type="password" autocomplete="new-password" required>
+            <div class="pwd-wrap">
+              <input id="ap" type="password" autocomplete="new-password" required>
+              <button type="button" class="pwd-toggle" onclick="togglePwd('ap', this)">Ver</button>
+            </div>
           </div>
           <div class="field">
             <label for="ar">Rol</label>
@@ -638,6 +822,70 @@ const ADMIN_HTML = `<!DOCTYPE html>
       </div>
     </div>
 
+    <!-- Asignar Workflow -->
+    <div class="card" style="margin-top:1.25rem;">
+      <h2>Asignar Workflow a Cuenta</h2>
+      <p style="font-size:0.8rem;color:#64748b;margin-bottom:1rem;line-height:1.5;">Si hay error para encontrar workflows, es posible que no se encuentre la API de workflows en ese espacio de trabajo. Ver con el administrador.</p>
+      <div class="assign-row">
+        <div class="field" style="margin:0;">
+          <label for="aw-domain">Dominio</label>
+          <select id="aw-domain">
+            <option value="">— Seleccionar dominio —</option>
+          </select>
+        </div>
+        <div class="field" style="margin:0;">
+          <label for="aw-account">Cuenta</label>
+          <select id="aw-account" disabled>
+            <option value="">— Seleccionar cuenta —</option>
+          </select>
+        </div>
+      </div>
+      <div id="aw-loading" style="display:none;color:#64748b;font-size:0.875rem;margin-top:0.75rem;">Cargando workflows de Finnegans…</div>
+      <div id="aw-workflow-wrap" style="display:none;">
+        <div class="assign-row" style="margin-top:0.75rem;">
+          <div class="field" style="margin:0;">
+            <label for="aw-select-venta">Workflow — Pedido de Venta</label>
+            <select id="aw-select-venta">
+              <option value="">— Sin workflow —</option>
+            </select>
+          </div>
+          <div class="field" style="margin:0;">
+            <label for="aw-select-compra">Workflow — Pedido de Compra</label>
+            <select id="aw-select-compra">
+              <option value="">— Sin workflow —</option>
+            </select>
+          </div>
+        </div>
+        <button class="btn btn-primary" id="aw-save-btn" style="margin-top:1rem;width:auto;padding-left:1.5rem;padding-right:1.5rem;">Guardar</button>
+        <p id="aw-msg" class="msg hidden"></p>
+      </div>
+    </div>
+
+    <!-- Administradores del panel -->
+    <div class="card" style="margin-top:1.25rem;">
+      <h2>Administradores del panel</h2>
+      <div id="admins-list"></div>
+      <form id="admin-user-form">
+        <div class="assign-row">
+          <div class="field" style="margin:0;">
+            <label for="aau">Nuevo usuario</label>
+            <input id="aau" type="text" placeholder="nombre" autocomplete="off" required>
+          </div>
+          <div class="field" style="margin:0;">
+            <label for="aap">Contraseña</label>
+            <div class="pwd-wrap">
+              <input id="aap" type="password" autocomplete="new-password" required>
+              <button type="button" class="pwd-toggle" onclick="togglePwd('aap', this)">Ver</button>
+            </div>
+          </div>
+        </div>
+        <button class="btn btn-primary" type="submit" id="aau-btn" style="margin-top:0.75rem;width:auto;padding-left:1.5rem;padding-right:1.5rem;">
+          Crear administrador
+        </button>
+        <p id="aau-msg" class="msg hidden"></p>
+      </form>
+    </div>
+
     <!-- Logs -->
     <div class="card logs-card">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.25rem;">
@@ -653,6 +901,13 @@ const ADMIN_HTML = `<!DOCTYPE html>
 
   <script>
     var token = sessionStorage.getItem('fstrack_admin_token');
+
+    function togglePwd(id, btn) {
+      var input = document.getElementById(id);
+      var showing = input.type === 'text';
+      input.type = showing ? 'password' : 'text';
+      btn.textContent = showing ? 'Ver' : 'Ocultar';
+    }
 
     function show(id) { document.getElementById(id).classList.remove('hidden'); }
     function hide(id) { document.getElementById(id).classList.add('hidden'); }
@@ -680,12 +935,16 @@ const ADMIN_HTML = `<!DOCTYPE html>
 
     function loadDomains() {
       return api('GET', '/domains').then(function(r) {
-        var selects = [document.getElementById('ad'), document.getElementById('ac-domain')];
+        var selects = [
+          document.getElementById('ad'),
+          document.getElementById('ac-domain'),
+          document.getElementById('aw-domain'),
+        ];
         selects.forEach(function(select) {
-          var isAc = select.id === 'ac-domain';
-          select.innerHTML = isAc ? '<option value="">— Seleccionar dominio —</option>' : '';
+          var isDropdown = select.id !== 'ad';
+          select.innerHTML = isDropdown ? '<option value="">— Seleccionar dominio —</option>' : '';
           if (r.ok && r.data.domains) {
-            if (r.data.domains.length === 0 && !isAc) {
+            if (r.data.domains.length === 0 && !isDropdown) {
               select.innerHTML = '<option value="">— Sin dominios activos —</option>';
             } else {
               r.data.domains.forEach(function(d) {
@@ -700,10 +959,40 @@ const ADMIN_HTML = `<!DOCTYPE html>
       });
     }
 
+    function loadAdmins() {
+      api('GET', '/admin-users').then(function(r) {
+        var container = document.getElementById('admins-list');
+        if (!r.ok || !r.data.admins || r.data.admins.length === 0) {
+          container.innerHTML = '<p style="color:#64748b;font-size:0.875rem;margin-bottom:1rem;">Sin administradores registrados.</p>';
+          return;
+        }
+        var html = '<table class="logs-table" style="margin-bottom:1.25rem;"><thead><tr><th>Usuario</th><th>Creado</th><th></th></tr></thead><tbody>';
+        var isLast = r.data.admins.length === 1;
+        r.data.admins.forEach(function(a) {
+          html += '<tr>';
+          html += '<td style="font-weight:500;color:#f1f5f9;">' + a.username + '</td>';
+          html += '<td>' + new Date(a.created_at).toLocaleDateString("es-AR") + '</td>';
+          html += '<td><button class="btn btn-ghost" style="font-size:0.75rem;padding:0.3rem 0.7rem;color:#fca5a5;border-color:rgba(239,68,68,0.35);"' + (isLast ? ' disabled title="No se puede eliminar el único administrador."' : ' onclick="deleteAdmin(' + a.id + ',&#39;' + a.username + '&#39;)"') + '>Eliminar</button></td>';
+          html += '</tr>';
+        });
+        html += '</tbody></table>';
+        container.innerHTML = html;
+      });
+    }
+
+    function deleteAdmin(id, username) {
+      if (!confirm('¿Eliminar al administrador "' + username + '"?\\nEsta acción no se puede deshacer.')) return;
+      api('DELETE', '/delete-admin-user/' + id).then(function(r) {
+        if (r.ok) { loadAdmins(); }
+        else { alert(r.data.error || 'Error al eliminar.'); }
+      });
+    }
+
     function showDashboard() {
       hide('login-panel');
       show('dashboard');
       loadDomains();
+      loadAdmins();
     }
 
     if (token) showDashboard();
@@ -834,6 +1123,29 @@ const ADMIN_HTML = `<!DOCTYPE html>
         container.innerHTML = '<p style="color:#fca5a5;font-size:0.875rem;">No se pudo conectar al servidor.</p>';
       });
     });
+    // ── CREATE ADMIN USER ─────────────────────────────────────────────
+    document.getElementById('admin-user-form').addEventListener('submit', function(e) {
+      e.preventDefault();
+      setLoading('aau-btn', true);
+      hide('aau-msg');
+      api('POST', '/create-admin-user', {
+        username: document.getElementById('aau').value.trim(),
+        password: document.getElementById('aap').value,
+      }).then(function(r) {
+        setLoading('aau-btn', false);
+        if (r.ok) {
+          showMsg('aau-msg', r.data.message, 'success');
+          document.getElementById('admin-user-form').reset();
+          loadAdmins();
+        } else {
+          showMsg('aau-msg', r.data.error || 'Error al crear administrador.', 'error');
+        }
+      }).catch(function() {
+        setLoading('aau-btn', false);
+        showMsg('aau-msg', 'No se pudo conectar al servidor.', 'error');
+      });
+    });
+
     // ── ASSIGN COMPANIES ──────────────────────────────────────────────
     var acDomainSel  = document.getElementById('ac-domain');
     var acAccountSel = document.getElementById('ac-account');
@@ -929,6 +1241,104 @@ const ADMIN_HTML = `<!DOCTYPE html>
         var el = document.getElementById('ac-msg');
         el.textContent = 'No se pudo conectar al servidor.';
         el.className = 'msg error';
+      });
+    });
+    // ── ASSIGN WORKFLOW ───────────────────────────────────────────────
+    var awDomainSel  = document.getElementById('aw-domain');
+    var awAccountSel = document.getElementById('aw-account');
+    var awLoading    = document.getElementById('aw-loading');
+    var awWrap       = document.getElementById('aw-workflow-wrap');
+    var awSelect     = document.getElementById('aw-select');
+    var awSaveBtn    = document.getElementById('aw-save-btn');
+    var awMsg        = document.getElementById('aw-msg');
+
+    var awAllWorkflows = [];
+    var awSelectVenta  = document.getElementById('aw-select-venta');
+    var awSelectCompra = document.getElementById('aw-select-compra');
+
+    function populateAwSelects(assignedVenta, assignedCompra) {
+      [awSelectVenta, awSelectCompra].forEach(function(sel) {
+        sel.innerHTML = '<option value="">— Sin workflow —</option>';
+        awAllWorkflows.forEach(function(w) {
+          var opt = document.createElement('option');
+          opt.value = w.value;
+          opt.textContent = w.label + ' (' + w.value + ')';
+          sel.appendChild(opt);
+        });
+      });
+      if (assignedVenta)  awSelectVenta.value  = assignedVenta;
+      if (assignedCompra) awSelectCompra.value = assignedCompra;
+    }
+
+    awDomainSel.addEventListener('change', function() {
+      var domainId = awDomainSel.value;
+      awAccountSel.innerHTML = '<option value="">— Seleccionar cuenta —</option>';
+      awAccountSel.disabled = true;
+      awWrap.style.display = 'none';
+      awLoading.style.display = 'none';
+      awAllWorkflows = [];
+      if (!domainId) return;
+
+      api('GET', '/accounts?domain_id=' + domainId).then(function(r) {
+        if (!r.ok) return;
+        awAccountSel.disabled = false;
+        r.data.accounts.forEach(function(a) {
+          var opt = document.createElement('option');
+          opt.value = a.id;
+          opt.textContent = a.full_name + ' (' + a.username + ')';
+          awAccountSel.appendChild(opt);
+        });
+      });
+
+      awLoading.style.display = 'block';
+      awLoading.textContent = 'Cargando workflows de Finnegans…';
+      api('GET', '/finnegans-workflows?domain_id=' + domainId).then(function(r) {
+        awLoading.style.display = 'none';
+        if (!r.ok) { awLoading.style.display = 'block'; awLoading.textContent = r.data.error || 'Error al cargar workflows.'; return; }
+        awAllWorkflows = r.data.workflows;
+        if (awAccountSel.value) loadAccountWorkflow();
+      });
+    });
+
+    awAccountSel.addEventListener('change', function() {
+      awWrap.style.display = 'none';
+      awMsg.className = 'msg hidden';
+      if (!awAccountSel.value) return;
+      if (awAllWorkflows.length > 0) loadAccountWorkflow();
+    });
+
+    function loadAccountWorkflow() {
+      api('GET', '/account-workflow?account_id=' + awAccountSel.value).then(function(r) {
+        var assignedVenta  = r.ok && r.data.venta  ? r.data.venta.codigo  : '';
+        var assignedCompra = r.ok && r.data.compra ? r.data.compra.codigo : '';
+        populateAwSelects(assignedVenta, assignedCompra);
+        awWrap.style.display = 'block';
+        awMsg.className = 'msg hidden';
+      });
+    }
+
+    awSaveBtn.addEventListener('click', function() {
+      var accountId = awAccountSel.value;
+      if (!accountId) return;
+      var ventaVal   = awSelectVenta.value;
+      var compraVal  = awSelectCompra.value;
+      var ventaWf    = awAllWorkflows.find(function(w) { return w.value === ventaVal; });
+      var compraWf   = awAllWorkflows.find(function(w) { return w.value === compraVal; });
+      awSaveBtn.disabled = true;
+      api('POST', '/assign-workflow', {
+        account_id:    accountId,
+        venta_codigo:  ventaVal  || null,
+        venta_nombre:  ventaWf  ? ventaWf.label  : null,
+        compra_codigo: compraVal || null,
+        compra_nombre: compraWf ? compraWf.label : null,
+      }).then(function(r) {
+        awSaveBtn.disabled = false;
+        awMsg.textContent = r.ok ? r.data.message : (r.data.error || 'Error al guardar.');
+        awMsg.className = 'msg ' + (r.ok ? 'success' : 'error');
+      }).catch(function() {
+        awSaveBtn.disabled = false;
+        awMsg.textContent = 'No se pudo conectar al servidor.';
+        awMsg.className = 'msg error';
       });
     });
   </script>

@@ -4,7 +4,7 @@ const express = require('express');
 const cors = require('cors');
 
 const authRoutes = require('./auth');
-const adminRoutes = require('./admin');
+const { router: adminRoutes, ensureAdminTable } = require('./admin');
 const logRoutes = require('./log');
 const finnegansRoutes = require('./finnegans');
 
@@ -30,4 +30,5 @@ const port = process.env.PORT || 3001;
 
 app.listen(port, () => {
   console.log(`API listening on port ${port}`);
+  ensureAdminTable();
 });
